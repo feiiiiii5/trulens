@@ -31,7 +31,6 @@ from typing import (
     Dict,
     List,
     Optional,
-    Tuple,
     TypeVar,
     Union,
 )
@@ -69,7 +68,6 @@ from opentelemetry import trace
 import pydantic
 from pydantic.v1 import BaseModel as v1BaseModel
 from trulens.core.feedback import endpoint as core_endpoint
-from trulens.core.schema import base as base_schema
 from trulens.core.utils import constants as constant_utils
 from trulens.core.utils import pace as pace_utils
 from trulens.core.utils import pyschema as pyschema_utils
@@ -534,16 +532,6 @@ class OpenAICallback(core_endpoint.EndpointCallback):
         exclude=True,
     )
 
-    _FIELDS_MAP: ClassVar[List[Tuple[str, str]]] = [
-        ("cost", "total_cost"),
-        ("n_tokens", "total_tokens"),
-        ("n_successful_requests", "successful_requests"),
-        ("n_prompt_tokens", "prompt_tokens"),
-        ("n_completion_tokens", "completion_tokens"),
-    ]
-    """Pairs where first element is the cost attribute name and second is
-    attribute of langchain.OpenAICallbackHandler that corresponds to it."""
-
     def handle_generation_usage(self, model_name: str, usage: Any) -> None:
         """Record the token counts reported by a stream's usage chunk.
 
@@ -618,17 +606,33 @@ class OpenAICallback(core_endpoint.EndpointCallback):
 
         self.langchain_handler.on_llm_end(response)
 
-        addl_cost = base_schema.Cost(**{
-            cost_field: getattr(self.langchain_handler, langchain_field)
-            for (
-                cost_field,
-                langchain_field,
-            ) in OpenAICallback._FIELDS_MAP
-        })
+        # `langchain_handler` accumulates usage over its whole lifetime and
+        # this callback owns it exclusively and never resets it, so adding its
+        # counters here would re-count every earlier call: N calls inside one
+        # cost scope would report N(N+1)/2 of their usage (issue #2839). Take
+        # this call's own usage from the `LLMResult` instead -- the same place
+        # `on_llm_end` reads it -- and add only the per-call amounts.
+        llm_output = response.llm_output or {}
+        usage = llm_output.get("token_usage") or {}
 
-        # n_successful_requests comes from langchain handler.
+        prompt_tokens = usage.get("prompt_tokens") or 0
+        completion_tokens = usage.get("completion_tokens") or 0
+        total_tokens = usage.get("total_tokens") or (
+            prompt_tokens + completion_tokens
+        )
 
-        self.cost += addl_cost
+        self.cost.n_prompt_tokens += prompt_tokens
+        self.cost.n_completion_tokens += completion_tokens
+        self.cost.n_tokens += total_tokens
+        self.cost.n_successful_requests += 1
+
+        cost = token_cost_for_model(
+            llm_output.get("model_name") or "",
+            prompt_tokens,
+            completion_tokens,
+        )
+        if cost is not None:
+            self.cost.cost += cost
 
     def handle_embedding(self, response: Any) -> None:
         super().handle_embedding(response)
