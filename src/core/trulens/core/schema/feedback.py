@@ -459,6 +459,21 @@ class FeedbackDefinition(
 
         self.feedback_definition_id = feedback_definition_id
 
+    @pydantic.field_validator("selectors", mode="before")
+    @classmethod
+    def _validate_selectors(cls, value: Any) -> Any:
+        """Deserialize OTEL selectors, which dump as dicts without a Lens path."""
+        if not isinstance(value, dict):
+            return value
+        return {
+            name: (
+                Selector(**selector)
+                if isinstance(selector, dict) and "path" not in selector
+                else selector
+            )
+            for name, selector in value.items()
+        }
+
     def __repr__(self):
         return f"FeedbackDefinition({self.name},\n\tselectors={self.selectors},\n\tif_exists={self.if_exists}\n)"
 
